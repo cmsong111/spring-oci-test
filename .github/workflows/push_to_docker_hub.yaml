@@ -3,14 +3,17 @@ name: Build Multi-Platform Spring Boot Image
 on:
   push:
     branches:
-      - "*"
+      - "master"
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-oci-image:
+    name: Build OCI Image
     strategy:
       matrix:
-        platform: [linux/amd64, linux/arm64, linux/arm/v5]
+        os: [ ubuntu-22.04, ubuntu-22.04-arm ]
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
       - name: Set up JDK 21
@@ -28,21 +31,66 @@ jobs:
       - name: Get the version
         run: echo "VERSION=$(./gradlew properties -q | grep '^version:' | awk '{print $2}')" >> $GITHUB_ENV
 
-      - name: Set IMAGE_PLATFORM environment variable
-        run: echo "IMAGE_PLATFORM=${{ matrix.platform }}" >> $GITHUB_ENV
+      - name: Set OCI Image Name
+        run: echo "IMAGE_NAME=${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test:${{ env.VERSION }}-${{ matrix.os }}" >> $GITHUB_ENV
 
       - name: Build Boot Image with Buildpacks
-        run: ./gradlew bootBuildImage
+        run: |
+          ./gradlew bootBuildImage --imageName ${{ env.IMAGE_NAME }}
 
-      - name: Login to GitHub Container Registry
+      - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME  }}
-          password: ${{ secrets.DOCKERHUB_TOKEN  }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Push to GitHub Container Registry
+      - name: Push Individual Images
         run: |
-          docker tag docker.io/library/${{ github.repository }}:${{ env.VERSION }} ${{ vars.DOCKERHUB_USERNAME }}/${{ github.repository }}:latest
-          docker tag docker.io/library/${{ github.repository }}:${{ env.VERSION }} ${{ vars.DOCKERHUB_USERNAME }}/${{ github.repository }}:${{ github.ref_name }}-${{ env.VERSION }}
-          docker push ${{ vars.DOCKERHUB_USERNAME }}/${{ github.repository }}:latest
-          docker push ${{ vars.DOCKERHUB_USERNAME }}/${{ github.repository }}:${{ github.ref_name }}-${{ env.VERSION }}
+          docker push ${{ env.IMAGE_NAME }}
+
+    outputs:
+      version: ${{ env.VERSION }}
+
+  create-integrated-tag:
+    name: Create Integrated Tag
+    needs: build-oci-image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create Multi-Platform Image
+        run: |
+          docker manifest create ${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test:${{ needs.build-oci-image.outputs.version }} \
+            ${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test:${{ needs.build-oci-image.outputs.version }}-ubuntu-22.04 \
+            ${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test:${{ needs.build-oci-image.outputs.version }}-ubuntu-22.04-arm
+
+          docker manifest push ${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test:${{ needs.build-oci-image.outputs.version }}
+          
+          docker manifest create ${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test:latest \
+            ${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test:${{ needs.build-oci-image.outputs.version }}-ubuntu-22.04 \
+            ${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test:${{ needs.build-oci-image.outputs.version }}-ubuntu-22.04-arm
+          
+          docker manifest push ${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test:latest
+
+  remove-individual-tags:
+    name: Remove Individual Tags
+    needs:
+      - build-oci-image
+      - create-integrated-tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Remove Individual Tags
+        run: |
+          curl -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.DOCKERHUB_TOKEN }}" \
+            https://hub.docker.com/v2/repositories/${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test/tags/${{ needs.build-oci-image.outputs.version }}-ubuntu-22.04/
+          
+          curl -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.DOCKERHUB_TOKEN }}" \
+            https://hub.docker.com/v2/repositories/${{ vars.DOCKERHUB_USERNAME }}/spring-oci-test/tags/${{ needs.build-oci-image.outputs.version }}-ubuntu-22.04-arm/

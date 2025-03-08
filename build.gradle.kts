@@ -10,7 +10,7 @@ plugins {
 }
 
 group = "io.github.cmsong111"
-version = "0.0.1-SNAPSHOT"
+version = "0.0.1"
 
 java {
     toolchain {
@@ -45,9 +45,6 @@ tasks.withType<Test> {
     useJUnitPlatform()
 }
 
-val platform: String = System.getenv("IMAGE_PLATFORM") ?: "linux/amd64"
-
 tasks.withType<BootBuildImage> {
     createdDate = "now"
-    imagePlatform = platform
 }
